@@ -117,7 +117,10 @@ class ArousalState:
 
     def _apply(self) -> None:
         denom = self._alpha + self._beta
-        arousal = self._theta / denom if denom > 1e-6 else 0.0
+        # Mind Monitor's *_absolute band powers are log-scale (Bels) and are
+        # commonly negative, so denom is often negative too -- guard against
+        # it being near zero in magnitude, not just near-zero-and-positive.
+        arousal = self._theta / denom if abs(denom) > 1e-6 else 0.0
         self._arousal = arousal
         fraction = clamp01((arousal - AROUSAL_MIN) / (AROUSAL_MAX - AROUSAL_MIN))
         wet = WET_MIN + fraction * (WET_MAX - WET_MIN)
