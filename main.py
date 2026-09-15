@@ -31,6 +31,7 @@ Run:
 import argparse
 import sys
 import threading
+import time
 
 from pedalboard import Pedalboard, Reverb
 from pedalboard.io import AudioStream
@@ -97,6 +98,7 @@ class ArousalState:
         self._theta = 0.0
         self._alpha = 0.0
         self._beta = 0.0
+        self._arousal = 0.0
 
     def update_theta(self, value: float) -> None:
         with self._lock:
@@ -116,16 +118,16 @@ class ArousalState:
     def _apply(self) -> None:
         denom = self._alpha + self._beta
         arousal = self._theta / denom if denom > 1e-6 else 0.0
+        self._arousal = arousal
         fraction = clamp01((arousal - AROUSAL_MIN) / (AROUSAL_MAX - AROUSAL_MIN))
         wet = WET_MIN + fraction * (WET_MAX - WET_MIN)
         self._reverb.wet_level = wet
         self._reverb.dry_level = 1.0 - wet
         self._reverb.room_size = ROOM_SIZE_MIN + fraction * (ROOM_SIZE_MAX - ROOM_SIZE_MIN)
-        print(
-            f"theta={self._theta:.3f} alpha={self._alpha:.3f} beta={self._beta:.3f} "
-            f"arousal={arousal:.3f} -> wet={wet:.2f} room_size={self._reverb.room_size:.2f}",
-            flush=True,
-        )
+
+    def get_arousal(self) -> float:
+        with self._lock:
+            return self._arousal
 
 
 def build_effects_chain() -> tuple[Pedalboard, Reverb]:
@@ -141,11 +143,18 @@ def build_effects_chain() -> tuple[Pedalboard, Reverb]:
     return board, reverb
 
 
+def _mean(values: tuple[float, ...]) -> float:
+    return sum(values) / len(values) if values else 0.0
+
+
 def make_dispatcher(state: ArousalState) -> Dispatcher:
+    # Mind Monitor / muse-lsl send one value per EEG channel (e.g. TP9, AF7,
+    # AF8, TP10) on each /muse/elements/*_absolute address, not a single
+    # scalar -- average across channels.
     dispatcher = Dispatcher()
-    dispatcher.map("/muse/elements/theta_absolute", lambda addr, value: state.update_theta(value))
-    dispatcher.map("/muse/elements/alpha_absolute", lambda addr, value: state.update_alpha(value))
-    dispatcher.map("/muse/elements/beta_absolute", lambda addr, value: state.update_beta(value))
+    dispatcher.map("/muse/elements/theta_absolute", lambda addr, *values: state.update_theta(_mean(values)))
+    dispatcher.map("/muse/elements/alpha_absolute", lambda addr, *values: state.update_alpha(_mean(values)))
+    dispatcher.map("/muse/elements/beta_absolute", lambda addr, *values: state.update_beta(_mean(values)))
     return dispatcher
 
 
@@ -154,6 +163,20 @@ def start_osc_server(ip: str, port: int, state: ArousalState) -> BlockingOSCUDPS
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
     return server
+
+
+def start_arousal_printer(state: ArousalState, interval: float) -> threading.Event:
+    """Print the current arousal index on its own thread, concurrently with
+    OSC handling and audio streaming, independent of how often OSC updates
+    arrive."""
+    stop_event = threading.Event()
+
+    def loop() -> None:
+        while not stop_event.wait(interval):
+            print(f"arousal={state.get_arousal():.3f}", flush=True)
+
+    threading.Thread(target=loop, daemon=True).start()
+    return stop_event
 
 
 def main() -> None:
@@ -170,6 +193,8 @@ def main() -> None:
                          help="UDP port to listen for Muse OSC data (default: 5500)")
     parser.add_argument("--buffer-size", type=int, default=128,
                          help="Audio buffer size in samples; smaller = lower latency (default: 128).")
+    parser.add_argument("--print-interval", type=float, default=0.5,
+                         help="Seconds between concurrent arousal-index prints (default: 0.5).")
     args = parser.parse_args()
 
     if args.list_devices:
@@ -189,6 +214,8 @@ def main() -> None:
     osc_server = start_osc_server(args.osc_ip, args.osc_port, state)
     print(f"Listening for Muse OSC on {args.osc_ip}:{args.osc_port}")
 
+    printer_stop = start_arousal_printer(state, args.print_interval)
+
     try:
         with AudioStream(
             input_device_name=input_device,
@@ -203,6 +230,7 @@ def main() -> None:
             )
             input()
     finally:
+        printer_stop.set()
         osc_server.shutdown()
 
 
