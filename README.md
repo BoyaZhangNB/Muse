@@ -1,0 +1,1 @@
+Note that the gain of the AMS24 should not be too high as it will cause clipping and distort the sound.

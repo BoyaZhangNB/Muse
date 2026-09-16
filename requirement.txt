@@ -1,0 +1,5 @@
+matplotlib==3.9.2
+numpy==2.4.6
+pedalboard==0.9.25
+python-osc==1.10.2
+sounddevice==0.5.6
